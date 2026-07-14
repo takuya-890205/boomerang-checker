@@ -27,7 +27,12 @@ CONTEXT_MAX_CHARS = 400  # 前後の発言1件あたり
 VALID_VERDICTS = {"misread", "explainable", "confirmed"}
 
 
-def _format_speech_block(label: str, speech: Speech, context: list[Speech]) -> str:
+def _format_speech_block(
+	label: str,
+	speech: Speech,
+	context: list[Speech],
+	keyword: str | None = None,
+) -> str:
 	"""弁護人プロンプト用に、発言本文＋前後の質疑文脈を整形する"""
 	position = speech.speaker_position or "不明"
 	group = speech.speaker_group or "不明"
@@ -35,7 +40,7 @@ def _format_speech_block(label: str, speech: Speech, context: list[Speech]) -> s
 		f"## 発言{label}（{speech.date} {speech.name_of_house} {speech.name_of_meeting}）",
 		f"発言者の肩書: {position} / 所属会派: {group}",
 		"",
-		truncate_speech(speech.speech_text, max_chars=SPEECH_MAX_CHARS),
+		truncate_speech(speech.speech_text, max_chars=SPEECH_MAX_CHARS, keyword=keyword),
 	]
 
 	if context:
@@ -54,10 +59,11 @@ def _build_defense_prompt(
 	result: BoomerangResult,
 	context_a: list[Speech],
 	context_b: list[Speech],
+	keyword: str | None = None,
 ) -> str:
 	"""弁護人レビュー用プロンプトを構築する"""
-	block_a = _format_speech_block("A", result.speech_a, context_a)
-	block_b = _format_speech_block("B", result.speech_b, context_b)
+	block_a = _format_speech_block("A", result.speech_a, context_a, keyword=keyword)
+	block_b = _format_speech_block("B", result.speech_b, context_b, keyword=keyword)
 
 	return f"""あなたは政治家「{speaker}」の弁護人です。
 以下の2つの国会発言について「矛盾している（ブーメラン発言だ）」という指摘がなされています。
@@ -103,6 +109,7 @@ def verify_results(
 	results: list[BoomerangResult],
 	api_key: str | None = None,
 	fetch_context: bool = True,
+	keyword: str | None = None,
 ) -> list[BoomerangResult]:
 	"""検出結果を弁護人レビューにかけ、生き残ったものだけ返す。
 
@@ -111,6 +118,7 @@ def verify_results(
 		results: analyze_speeches の検出結果
 		api_key: Gemini API キー（省略時は環境変数 GEMINI_API_KEY を使用）
 		fetch_context: True のとき国会APIから前後の質疑文脈を取得して判定材料にする
+		keyword: 争点キーワード（長い発言の切り出しをキーワード中心にする）
 
 	Returns:
 		misread と判定されたペアを除いた BoomerangResult のリスト
@@ -131,7 +139,7 @@ def verify_results(
 			if not context_a and not context_b:
 				print("    （前後の質疑文脈は取得できませんでした。本文のみで判定します）")
 
-		prompt = _build_defense_prompt(speaker, r, context_a, context_b)
+		prompt = _build_defense_prompt(speaker, r, context_a, context_b, keyword=keyword)
 
 		try:
 			data = generate_json(prompt, api_key=api_key)

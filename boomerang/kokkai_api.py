@@ -258,8 +258,18 @@ def fetch_context_speeches(
 	return context
 
 
-def truncate_speech(text: str, max_chars: int = 500) -> str:
-	"""発言テキストを指定文字数で切り詰める"""
+def truncate_speech(text: str, max_chars: int = 500, keyword: str | None = None) -> str:
+	"""発言テキストを指定文字数に切り詰める。
+
+	keyword を指定すると、先頭からではなく**キーワード出現箇所を中心に**切り出す。
+	長い演説（代表質問等）では争点への言及が本文の奥にあることが多く、
+	先頭からの切り詰めでは肝心の部分が分析に届かないため。
+
+	Args:
+		text: 発言本文
+		max_chars: 最大文字数（キーワード窓の場合は目安。中略記号の分だけ僅かに超えうる）
+		keyword: 争点キーワード（省略時は従来どおり先頭から切り詰め）
+	"""
 	# HTMLタグの簡易除去
 	import re
 
@@ -267,4 +277,28 @@ def truncate_speech(text: str, max_chars: int = 500) -> str:
 	text = text.strip()
 	if len(text) <= max_chars:
 		return text
+
+	if keyword:
+		positions = [m.start() for m in re.finditer(re.escape(keyword), text)]
+		if positions:
+			# 出現箇所（最大3つ）を中心に窓を作り、重なる窓はマージして中略で連結する
+			positions = positions[:3]
+			window = max_chars // len(positions)
+			half = window // 2
+			spans: list[list[int]] = []
+			for p in positions:
+				start = max(0, p - half)
+				end = min(len(text), start + window)
+				if spans and start <= spans[-1][1]:
+					spans[-1][1] = end
+				else:
+					spans.append([start, end])
+			parts = []
+			for start, end in spans:
+				prefix = "…" if start > 0 else ""
+				suffix = "…" if end < len(text) else ""
+				parts.append(f"{prefix}{text[start:end]}{suffix}")
+			return "\n（中略）\n".join(parts)
+		# キーワードが本文に無い場合は従来どおり先頭から
+
 	return text[:max_chars] + "..."

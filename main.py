@@ -136,6 +136,7 @@ def main() -> None:
 				speaker=speaker,
 				results=results,
 				api_key=args.api_key,
+				keyword=args.keyword,
 			)
 			verified_run = True
 			dropped = before - len(results)

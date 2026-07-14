@@ -106,6 +106,7 @@ def _increment_and_check_daily_limit() -> int:
 def _trim_speeches_to_token_budget(
 	speaker: str,
 	speeches: list[Speech],
+	keyword: str | None = None,
 ) -> list[Speech]:
 	"""トークン予算内に収まるよう発言数を削減する"""
 	# システムプロンプト部分の固定トークンを差し引く
@@ -115,7 +116,7 @@ def _trim_speeches_to_token_budget(
 	trimmed: list[Speech] = []
 	used_tokens = 0
 	for s in speeches:
-		text = truncate_speech(s.speech_text, max_chars=800)
+		text = truncate_speech(s.speech_text, max_chars=800, keyword=keyword)
 		tokens = _estimate_tokens(text) + 50  # 区切り文字等のオーバーヘッド
 		if used_tokens + tokens > budget:
 			break
@@ -194,10 +195,12 @@ def generate_json(prompt: str, api_key: str | None = None) -> object:
 				contents=prompt,
 			)
 			break  # 成功したらループを抜ける
-		except genai_errors.ClientError as e:
-			if "429" in str(e) and attempt < MAX_RETRIES - 1:
+		except genai_errors.APIError as e:
+			# 429（レート制限）と5xx（サーバー側の一時障害）はリトライ対象
+			retryable = e.code == 429 or (e.code is not None and 500 <= e.code < 600)
+			if retryable and attempt < MAX_RETRIES - 1:
 				wait = RETRY_BASE_WAIT * (2 ** attempt)
-				print(f"  ⏳ レート制限に達しました。{wait}秒後にリトライします... ({attempt + 1}/{MAX_RETRIES - 1})")
+				print(f"  ⏳ 一時エラー（{e.code}）。{wait}秒後にリトライします... ({attempt + 1}/{MAX_RETRIES - 1})")
 				time.sleep(wait)
 			else:
 				raise
@@ -223,7 +226,8 @@ def _build_prompt(speaker: str, speeches: list[Speech], keyword: str | None = No
 	"""分析用プロンプトを構築する"""
 	speech_entries = []
 	for i, s in enumerate(speeches):
-		text = truncate_speech(s.speech_text, max_chars=800)
+		# 争点キーワード指定時は出現箇所を中心に切り出す（長い演説の奥にある言及を落とさない）
+		text = truncate_speech(s.speech_text, max_chars=800, keyword=keyword)
 		year = s.date[:4] if s.date else "不明"
 		# ラベルは0始まり（JSONで返させる speech_a_index と揃える。ずれると原文照合が全滅する）
 		speech_entries.append(
@@ -268,6 +272,7 @@ def _build_prompt(speaker: str, speeches: list[Speech], keyword: str | None = No
 注意:
 - speech_a_index, speech_b_index は [発言N] の N をそのまま使ってください（0始まり）
 - excerpt_a / excerpt_b は上記の発言本文から**一字一句改変せずコピー**してください（要約・言い換え・省略記号の挿入は禁止。後段で原文との完全一致を機械検証します）
+- 発言本文中の「…」や「（中略）」は表示上の省略記号です。これらを**またいだ抜粋・含んだ抜粋は禁止**（連続した本文の範囲からのみ抜粋すること）
 - score は矛盾の度合い（0-100）。高いほど明確な矛盾
 - 70点以上のものだけ報告してください
 - 発言の時系列を考慮し、古い発言をA、新しい発言をBとしてください
@@ -299,7 +304,7 @@ def analyze_speeches(
 		return []
 
 	# トークン予算に合わせて発言数を調整
-	speeches = _trim_speeches_to_token_budget(speaker, speeches)
+	speeches = _trim_speeches_to_token_budget(speaker, speeches, keyword=keyword)
 
 	prompt = _build_prompt(speaker, speeches, keyword=keyword)
 	estimated_tokens = _estimate_tokens(prompt)
