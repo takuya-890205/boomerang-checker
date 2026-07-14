@@ -145,6 +145,35 @@ def verify_excerpt(excerpt: str, original_text: str) -> bool:
 	return _normalize_for_match(excerpt) in _normalize_for_match(original_text)
 
 
+def _anchor_speech(
+	label: str,
+	speeches: list[Speech],
+	idx: int,
+	excerpt: str,
+) -> tuple[Speech, str, bool]:
+	"""抜粋の原文照合を行い、必要なら正しい発言へ再アンカーする。
+
+	LLMが発言インデックスを取り違えても、原文抜粋が実在する発言が一意に見つかれば
+	そちらを採用する（抜粋＝一字一句の証拠の方がインデックスより信頼できる）。
+
+	Returns:
+		(発言, 抜粋, 抜粋が原文と一致したか)
+	"""
+	speech = speeches[idx]
+	if not excerpt:
+		return speech, excerpt, False
+	if verify_excerpt(excerpt, speech.speech_text):
+		return speech, excerpt, True
+
+	matches = [s for s in speeches if verify_excerpt(excerpt, s.speech_text)]
+	if len(matches) == 1:
+		print(f"  🔧 抜粋{label}のインデックスずれを自動補正しました（発言{idx} → {matches[0].date}の発言）")
+		return matches[0], excerpt, True
+
+	print(f"  ⚠️  抜粋{label}が原文と一致しません（改変引用の疑い）: 「{excerpt[:40]}...」")
+	return speech, excerpt, False
+
+
 def generate_json(prompt: str, api_key: str | None = None) -> object:
 	"""Gemini にプロンプトを投げ、レスポンスをJSONとしてパースして返す。
 
@@ -190,17 +219,24 @@ def generate_json(prompt: str, api_key: str | None = None) -> object:
 		) from e
 
 
-def _build_prompt(speaker: str, speeches: list[Speech]) -> str:
+def _build_prompt(speaker: str, speeches: list[Speech], keyword: str | None = None) -> str:
 	"""分析用プロンプトを構築する"""
 	speech_entries = []
 	for i, s in enumerate(speeches):
 		text = truncate_speech(s.speech_text, max_chars=800)
 		year = s.date[:4] if s.date else "不明"
+		# ラベルは0始まり（JSONで返させる speech_a_index と揃える。ずれると原文照合が全滅する）
 		speech_entries.append(
-			f"[発言{i + 1}] ({year}年 {s.name_of_house} {s.name_of_meeting})\n{text}"
+			f"[発言{i}] ({year}年 {s.name_of_house} {s.name_of_meeting})\n{text}"
 		)
 
 	speeches_text = "\n\n---\n\n".join(speech_entries)
+
+	keyword_note = (
+		f"\n特に争点「{keyword}」に対する立場・主張の変化に注目してください。\n"
+		if keyword
+		else ""
+	)
 
 	return f"""あなたは国会発言の矛盾分析の専門家です。
 以下は「{speaker}」議員の国会での発言一覧です。
@@ -209,6 +245,7 @@ def _build_prompt(speaker: str, speeches: list[Speech]) -> str:
 
 上記の発言群から、互いに矛盾する発言ペア（ブーメラン発言）を最大5組検出してください。
 同じ議員が過去に主張していたことと正反対のことを言っている、または過去に批判していたことを自分がやっている、というケースを探してください。
+{keyword_note}
 
 以下のJSON形式で出力してください。矛盾が見つからない場合は空配列を返してください。
 
@@ -229,7 +266,7 @@ def _build_prompt(speaker: str, speeches: list[Speech]) -> str:
 ```
 
 注意:
-- speech_a_index, speech_b_index は発言番号（0始まり）
+- speech_a_index, speech_b_index は [発言N] の N をそのまま使ってください（0始まり）
 - excerpt_a / excerpt_b は上記の発言本文から**一字一句改変せずコピー**してください（要約・言い換え・省略記号の挿入は禁止。後段で原文との完全一致を機械検証します）
 - score は矛盾の度合い（0-100）。高いほど明確な矛盾
 - 70点以上のものだけ報告してください
@@ -245,6 +282,7 @@ def analyze_speeches(
 	speaker: str,
 	speeches: list[Speech],
 	api_key: str | None = None,
+	keyword: str | None = None,
 ) -> list[BoomerangResult]:
 	"""発言リストからブーメラン発言を検出する。
 
@@ -252,6 +290,7 @@ def analyze_speeches(
 		speaker: 議員名
 		speeches: 発言リスト
 		api_key: Gemini API キー（省略時は環境変数 GEMINI_API_KEY を使用）
+		keyword: 争点キーワード（指定時はその争点への立場変化に注目させる）
 
 	Returns:
 		BoomerangResult のリスト
@@ -262,7 +301,7 @@ def analyze_speeches(
 	# トークン予算に合わせて発言数を調整
 	speeches = _trim_speeches_to_token_budget(speaker, speeches)
 
-	prompt = _build_prompt(speaker, speeches)
+	prompt = _build_prompt(speaker, speeches, keyword=keyword)
 	estimated_tokens = _estimate_tokens(prompt)
 	print(f"  📝 推定入力トークン数: {estimated_tokens:,}")
 
@@ -277,35 +316,37 @@ def analyze_speeches(
 		if idx_a >= len(speeches) or idx_b >= len(speeches):
 			continue
 
-		speech_a = speeches[idx_a]
-		speech_b = speeches[idx_b]
+		# 原文抜粋の機械検証（LLMの捏造・改変引用をここで検出する）。
+		# 主張されたインデックスで一致しない場合は、抜粋の実在箇所を全発言から探して
+		# 再アンカーする（原文抜粋はインデックスより信頼できる証拠のため）
+		speech_a, excerpt_a, excerpt_a_verified = _anchor_speech(
+			"A", speeches, idx_a, item.get("excerpt_a", "")
+		)
+		speech_b, excerpt_b, excerpt_b_verified = _anchor_speech(
+			"B", speeches, idx_b, item.get("excerpt_b", "")
+		)
 
-		# year_gap をAPIレスポンスから取得、取得できない場合は発言日付から計算
-		year_gap_raw = item.get("year_gap")
-		if year_gap_raw is not None:
-			year_gap = int(year_gap_raw)
-		else:
-			# 発言日付から年の差を計算
-			year_a = int(speech_a.date[:4]) if speech_a.date and len(speech_a.date) >= 4 else 0
-			year_b = int(speech_b.date[:4]) if speech_b.date and len(speech_b.date) >= 4 else 0
-			year_gap = abs(year_a - year_b)
+		summary_a = item.get("summary_a", "")
+		summary_b = item.get("summary_b", "")
 
-		# 原文抜粋の機械検証（LLMの捏造・改変引用をここで検出する）
-		excerpt_a = item.get("excerpt_a", "")
-		excerpt_b = item.get("excerpt_b", "")
-		excerpt_a_verified = verify_excerpt(excerpt_a, speech_a.speech_text)
-		excerpt_b_verified = verify_excerpt(excerpt_b, speech_b.speech_text)
-		if excerpt_a and not excerpt_a_verified:
-			print(f"  ⚠️  抜粋Aが原文と一致しません（改変引用の疑い）: 「{excerpt_a[:40]}...」")
-		if excerpt_b and not excerpt_b_verified:
-			print(f"  ⚠️  抜粋Bが原文と一致しません（改変引用の疑い）: 「{excerpt_b[:40]}...」")
+		# 時系列の正規化（古い方をAにする。プロンプト指示だけに頼らない）
+		if speech_a.date and speech_b.date and speech_a.date > speech_b.date:
+			speech_a, speech_b = speech_b, speech_a
+			summary_a, summary_b = summary_b, summary_a
+			excerpt_a, excerpt_b = excerpt_b, excerpt_a
+			excerpt_a_verified, excerpt_b_verified = excerpt_b_verified, excerpt_a_verified
+
+		# year_gap は常に発言日付から計算（LLM出力に依存しない）
+		year_a = int(speech_a.date[:4]) if speech_a.date and len(speech_a.date) >= 4 else 0
+		year_b = int(speech_b.date[:4]) if speech_b.date and len(speech_b.date) >= 4 else 0
+		year_gap = abs(year_a - year_b) if year_a and year_b else 0
 
 		results.append(
 			BoomerangResult(
 				speech_a=speech_a,
 				speech_b=speech_b,
-				summary_a=item.get("summary_a", ""),
-				summary_b=item.get("summary_b", ""),
+				summary_a=summary_a,
+				summary_b=summary_b,
 				contradiction=item.get("contradiction", ""),
 				score=int(item.get("score", 0)),
 				year_gap=year_gap,

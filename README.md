@@ -55,6 +55,10 @@ python main.py 岸田文雄 --max-speeches 100
 # 日付範囲を指定
 python main.py 岸田文雄 --from-date 2020-01-01 --until-date 2024-12-31
 
+# 争点キーワードで絞り込み（Xで炎上中の争点に対する立場変化を照合する使い方。
+# 本文検索で絞れる分、10〜30年前の「昔の約束」まで遡って取得する）
+python main.py 野田佳彦 --keyword 定数削減
+
 # SNS投稿用フォーマットも表示
 python main.py 岸田文雄 --sns
 

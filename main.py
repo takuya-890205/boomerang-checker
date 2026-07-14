@@ -27,6 +27,10 @@ def parse_args() -> argparse.Namespace:
 		help="議員名（例: 岸田文雄）",
 	)
 	parser.add_argument(
+		"--keyword",
+		help="争点キーワード（例: 定数削減）。発言本文で絞り込み、10〜30年前まで遡って照合する",
+	)
+	parser.add_argument(
 		"--max-speeches",
 		type=int,
 		default=100,
@@ -81,7 +85,10 @@ def main() -> None:
 			sys.exit(1)
 
 	# 1. 国会議事録APIから発言を取得
-	print(f"\n⏳ 「{speaker}」の国会発言を取得中...")
+	if args.keyword:
+		print(f"\n⏳ 「{speaker}」の国会発言（争点: {args.keyword}）を取得中...")
+	else:
+		print(f"\n⏳ 「{speaker}」の国会発言を取得中...")
 	try:
 		speeches = fetch_speeches(
 			speaker_name=speaker,
@@ -89,6 +96,7 @@ def main() -> None:
 			from_date=args.from_date,
 			until_date=args.until_date,
 			spread_years=True,
+			keyword=args.keyword,
 		)
 	except Exception as e:
 		print(f"エラー: 発言の取得に失敗しました: {e}", file=sys.stderr)
@@ -108,6 +116,7 @@ def main() -> None:
 			speaker=speaker,
 			speeches=speeches,
 			api_key=args.api_key,
+			keyword=args.keyword,
 		)
 	except Exception as e:
 		print(f"エラー: 分析に失敗しました: {e}", file=sys.stderr)

@@ -40,6 +40,7 @@ def _fetch_speeches_in_range(
 	max_speeches: int,
 	from_date: str | None = None,
 	until_date: str | None = None,
+	keyword: str | None = None,
 ) -> list[Speech]:
 	"""指定した期間の発言を取得するヘルパー関数。
 
@@ -48,6 +49,7 @@ def _fetch_speeches_in_range(
 		max_speeches: 取得する最大発言数
 		from_date: 取得開始日（YYYY-MM-DD形式、省略可）
 		until_date: 取得終了日（YYYY-MM-DD形式、省略可）
+		keyword: 争点キーワード（発言本文の検索語。省略可）
 
 	Returns:
 		Speech オブジェクトのリスト
@@ -67,6 +69,8 @@ def _fetch_speeches_in_range(
 			params["from"] = from_date
 		if until_date:
 			params["until"] = until_date
+		if keyword:
+			params["any"] = keyword
 
 		response = requests.get(SPEECH_API_URL, params=params, timeout=30)
 		response.raise_for_status()
@@ -116,6 +120,7 @@ def fetch_speeches(
 	from_date: str | None = None,
 	until_date: str | None = None,
 	spread_years: bool = True,
+	keyword: str | None = None,
 ) -> list[Speech]:
 	"""指定した議員の発言を取得する。
 
@@ -124,8 +129,10 @@ def fetch_speeches(
 		max_speeches: 取得する最大発言数（デフォルト100）
 		from_date: 取得開始日（YYYY-MM-DD形式、省略可）
 		until_date: 取得終了日（YYYY-MM-DD形式、省略可）
-		spread_years: True のとき、直近2年分と3〜10年前の発言を分けて取得してマージ。
+		spread_years: True のとき、期間を複数窓に分けて取得してマージ。
 		             from_date/until_date が明示指定された場合は従来通り動作する。
+		keyword: 争点キーワード（例: "定数削減"）。指定すると発言本文で絞り込み、
+		        取得窓も 10〜30年前まで広げる（昔の「約束」まで遡って照合するため）
 
 	Returns:
 		Speech オブジェクトのリスト
@@ -137,43 +144,53 @@ def fetch_speeches(
 			max_speeches=max_speeches,
 			from_date=from_date,
 			until_date=until_date,
+			keyword=keyword,
 		)
 
 	# spread_years=True のとき、期間を分割して取得する
+	# （APIは新しい順で返すため、1窓だと古い発言が max_speeches からあふれて欠落する）
 	today = date.today()
 
-	# 直近2年分（60%）
-	recent_max = int(max_speeches * 0.6)
-	recent_until = today.strftime("%Y-%m-%d")
-	recent_from = (today - timedelta(days=365 * 2)).strftime("%Y-%m-%d")
+	def years_ago(n: int) -> str:
+		return (today - timedelta(days=365 * n)).strftime("%Y-%m-%d")
 
-	# 3〜10年前（40%）
-	old_max = max_speeches - recent_max
-	old_until = (today - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
-	old_from = (today - timedelta(days=365 * 10)).strftime("%Y-%m-%d")
+	if keyword:
+		# 争点キーワード照合モード: キーワードでヒットが絞れる分、30年前まで遡る
+		windows = [
+			("直近2年", 0.4, years_ago(2), today.strftime("%Y-%m-%d")),
+			("3〜10年前", 0.3, years_ago(10), years_ago(3)),
+			("10〜30年前", 0.3, years_ago(30), years_ago(10)),
+		]
+	else:
+		windows = [
+			("直近2年", 0.6, years_ago(2), today.strftime("%Y-%m-%d")),
+			("3〜10年前", 0.4, years_ago(10), years_ago(3)),
+		]
 
-	print(f"  📅 直近2年分（最大{recent_max}件）を取得中...")
-	recent_speeches = _fetch_speeches_in_range(
-		speaker_name=speaker_name,
-		max_speeches=recent_max,
-		from_date=recent_from,
-		until_date=recent_until,
-	)
+	merged: list[Speech] = []
+	counts: list[str] = []
+	remaining = max_speeches
+	for i, (label, ratio, w_from, w_until) in enumerate(windows):
+		is_last = i == len(windows) - 1
+		w_max = remaining if is_last else min(remaining, int(max_speeches * ratio))
+		if w_max <= 0:
+			break
+		print(f"  📅 {label}（最大{w_max}件）を取得中...")
+		got = _fetch_speeches_in_range(
+			speaker_name=speaker_name,
+			max_speeches=w_max,
+			from_date=w_from,
+			until_date=w_until,
+			keyword=keyword,
+		)
+		merged.extend(got)
+		counts.append(f"{label}{len(got)}件")
+		remaining -= len(got)
+		# サーバー負荷軽減のためリクエスト間を空ける
+		if not is_last:
+			time.sleep(REQUEST_INTERVAL)
 
-	# サーバー負荷軽減のためリクエスト間を空ける
-	time.sleep(REQUEST_INTERVAL)
-
-	print(f"  📅 3〜10年前（最大{old_max}件）を取得中...")
-	old_speeches = _fetch_speeches_in_range(
-		speaker_name=speaker_name,
-		max_speeches=old_max,
-		from_date=old_from,
-		until_date=old_until,
-	)
-
-	# 両方のリストをマージして返す
-	merged = recent_speeches + old_speeches
-	print(f"  🔀 マージ結果: 直近{len(recent_speeches)}件 + 過去{len(old_speeches)}件 = 計{len(merged)}件")
+	print(f"  🔀 マージ結果: {' + '.join(counts)} = 計{len(merged)}件")
 	return merged
 
 
