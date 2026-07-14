@@ -95,6 +95,10 @@ python main.py 野田佳彦 --keyword 定数削減
 python main.py 野田佳彦 --keyword 定数削減 --x-handle NODAYOSHI55 \
   --source-url "2012-11-16:https://example.gov/kaiken20121116.html"
 
+# LLMをClaudeに切替（Claude Code CLIのサブスク枠。APIキー不要・高精度・低速）
+# 公開用の本番実行は claude、安価なスキャンは gemini（既定）が目安
+python main.py 野田佳彦 --promise --keyword 消費税 --llm claude
+
 # SNS投稿用フォーマットも表示
 python main.py 岸田文雄 --sns
 

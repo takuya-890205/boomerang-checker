@@ -288,12 +288,51 @@ def _anchor_speech(
 	return speech, excerpt, False
 
 
-def generate_json(prompt: str, api_key: str | None = None) -> object:
-	"""Gemini にプロンプトを投げ、レスポンスをJSONとしてパースして返す。
+# LLMプロバイダ（"gemini" = Gemini API / "claude" = Claude Code CLI のサブスク枠）
+_LLM_PROVIDER = "gemini"
 
-	日次リクエスト上限のカウント・429リトライ・コードブロック除去を共通処理する。
-	パースに失敗した場合は「矛盾なし」と区別するため例外を送出する。
+
+def set_llm_provider(provider: str) -> None:
+	"""使用するLLMプロバイダを切り替える（main.py の --llm から呼ばれる）"""
+	global _LLM_PROVIDER
+	if provider not in ("gemini", "claude"):
+		raise ValueError(f"未対応のLLMプロバイダ: {provider}")
+	_LLM_PROVIDER = provider
+
+
+def _generate_with_claude(prompt: str) -> str:
+	"""Claude Code CLI（claude -p）でプロンプトを処理する。
+
+	APIキー不要（Claude サブスクリプション枠を使用）。stdin でプロンプトを渡し、
+	stdout のみを回収する（フックのノイズは stderr に出るため混ざらない）。
 	"""
+	import shutil
+	import subprocess
+
+	exe = shutil.which("claude")
+	if not exe:
+		raise RuntimeError("claude CLI が見つかりません（--llm claude には Claude Code が必要です）")
+
+	creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+	proc = subprocess.run(
+		[exe, "-p"],
+		input=prompt,
+		capture_output=True,
+		text=True,
+		encoding="utf-8",
+		errors="replace",
+		timeout=600,
+		creationflags=creationflags,
+	)
+	if proc.returncode != 0 or not proc.stdout.strip():
+		raise RuntimeError(
+			f"claude CLI の実行に失敗しました (exit {proc.returncode}): {(proc.stderr or '')[:300]}"
+		)
+	return proc.stdout.strip()
+
+
+def _generate_with_gemini(prompt: str, api_key: str | None = None) -> str:
+	"""Gemini API でプロンプトを処理する（日次上限カウント・429/5xxリトライ付き）"""
 	remaining = _increment_and_check_daily_limit()
 	print(f"  📊 本日の残りリクエスト数: {remaining} / {DAILY_REQUEST_LIMIT}")
 
@@ -318,7 +357,19 @@ def generate_json(prompt: str, api_key: str | None = None) -> object:
 			else:
 				raise
 
-	response_text = response.text.strip()
+	return response.text.strip()
+
+
+def generate_json(prompt: str, api_key: str | None = None) -> object:
+	"""LLMにプロンプトを投げ、レスポンスをJSONとしてパースして返す。
+
+	プロバイダは set_llm_provider で切替（既定: Gemini）。
+	パースに失敗した場合は「矛盾なし」と区別するため例外を送出する。
+	"""
+	if _LLM_PROVIDER == "claude":
+		response_text = _generate_with_claude(prompt)
+	else:
+		response_text = _generate_with_gemini(prompt, api_key=api_key)
 
 	# JSON部分を抽出（```json ... ``` で囲まれている場合も対応）
 	if "```json" in response_text:

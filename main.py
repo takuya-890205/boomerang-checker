@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from boomerang.analyzer import analyze_speeches
+from boomerang.analyzer import analyze_speeches, set_llm_provider
 from boomerang.formatter import (
 	format_note,
 	format_promise_note,
@@ -72,6 +72,12 @@ def parse_args() -> argparse.Namespace:
 		help="Gemini API キー（省略時は環境変数 GEMINI_API_KEY を使用）",
 	)
 	parser.add_argument(
+		"--llm",
+		choices=["gemini", "claude"],
+		default="gemini",
+		help="分析に使うLLM。claude は Claude Code CLI のサブスク枠を使用（APIキー不要・高精度・低速）",
+	)
+	parser.add_argument(
 		"--promise",
 		action="store_true",
 		help="約束トラッカーモード（言vs行）。過去の約束・実績と現在の態度を突き合わせる（発言vs発言の矛盾検出の代わりに実行）",
@@ -103,6 +109,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
 	args = parse_args()
+
+	# LLMプロバイダの設定
+	set_llm_provider(args.llm)
+	if args.llm == "claude":
+		print("🤖 LLM: Claude（Claude Code CLI・サブスク枠）")
 
 	# 議員名が引数で指定されなければ対話的に入力
 	speaker = args.speaker
