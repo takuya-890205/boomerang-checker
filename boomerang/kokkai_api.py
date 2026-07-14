@@ -33,6 +33,8 @@ class Speech:
 	speaker_group: str = ""  # 発言者所属会派
 	issue_id: str = ""  # 会議録ID（前後文脈の取得に使用）
 	speech_order: int = 0  # 会議内の発言順
+	source: str = "国会会議録"  # 出典の種別（国会会議録 / 本人Xポスト / Web全文 等）
+	source_grade: str = "A"  # 出典の格付け（A=完全な一次記録 / B=一次だが完全性に留保 / C=断片）
 
 
 def _fetch_speeches_in_range(

@@ -52,13 +52,27 @@ class BoomerangResult:
 	defense: str = ""  # 政治家側の言い分（弁護人レビューの出力）
 
 	@property
+	def publish_tier(self) -> str:
+		"""公開階層を返す。
+
+		- "confirmed": 弁護人レビューでも矛盾が確定 → 断定調で公開可
+		- "gray": 説明可能と判定 → 想定される言い分を併記する形でのみ公開可
+		- "": 非公開（未検証・誤読・原文一致が取れていない）
+
+		いずれの公開階層も原文一致の機械検証を通過していることが前提。
+		"""
+		if not (self.excerpt_a_verified and self.excerpt_b_verified):
+			return ""
+		if self.verdict == "confirmed":
+			return "confirmed"
+		if self.verdict == "explainable":
+			return "gray"
+		return ""
+
+	@property
 	def is_publishable(self) -> bool:
-		"""SNS公開に耐えるか（弁護人レビューを通過し、抜粋の原文一致も確認済み）"""
-		return (
-			self.verdict == "confirmed"
-			and self.excerpt_a_verified
-			and self.excerpt_b_verified
-		)
+		"""何らかの形でSNS公開に耐えるか（断定調 or 言い分併記）"""
+		return bool(self.publish_tier)
 
 
 def _estimate_tokens(text: str) -> int:
@@ -132,18 +146,49 @@ def _trim_speeches_to_token_budget(
 
 
 def _normalize_for_match(text: str) -> str:
-	"""原文一致検証用にテキストを正規化する（空白・改行の揺れを吸収）"""
+	"""原文一致検証用にテキストを正規化する（空白・改行・全角半角の揺れを吸収）"""
 	import re
+	import unicodedata
 
 	text = re.sub(r"<[^>]+>", "", text)  # HTMLタグ除去（truncate_speech と揃える）
+	text = unicodedata.normalize("NFKC", text)
 	return re.sub(r"\s+", "", text)
 
 
+# 断片がこの長さ未満だと偶然一致しうるため検証を通さない
+MIN_FRAGMENT_CHARS = 8
+
+
 def verify_excerpt(excerpt: str, original_text: str) -> bool:
-	"""LLMが返した抜粋が原文に実在するかを検証する（ハルシネーション対策）"""
+	"""LLMが返した抜粋が原文に実在するかを検証する（ハルシネーション対策）。
+
+	「…」「（中略）」「...」で明示的に省略された抜粋は、断片ごとに分割し
+	**全断片が原文に、抜粋と同じ順序で実在する**場合のみ合格とする
+	（透明な省略は許容し、無言の改変・捏造は拒否する）。
+	"""
+	import re
+
 	if not excerpt:
 		return False
-	return _normalize_for_match(excerpt) in _normalize_for_match(original_text)
+
+	norm_original = _normalize_for_match(original_text)
+	fragments = [
+		f for f in re.split(r"…|（中略）|\.\.\.", excerpt) if _normalize_for_match(f)
+	]
+	if not fragments:
+		return False
+
+	pos = 0
+	for fragment in fragments:
+		norm_frag = _normalize_for_match(fragment)
+		if len(norm_frag) < MIN_FRAGMENT_CHARS:
+			return False  # 短すぎる断片は偶然一致しうるため不合格
+		found = norm_original.find(norm_frag, pos)
+		if found < 0:
+			return False
+		pos = found + len(norm_frag)
+
+	return True
 
 
 def _anchor_speech(

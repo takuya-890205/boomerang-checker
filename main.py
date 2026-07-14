@@ -15,6 +15,8 @@ from boomerang.analyzer import analyze_speeches
 from boomerang.formatter import format_note, format_sns, format_terminal, format_x
 from boomerang.kokkai_api import fetch_speeches
 from boomerang.verifier import verify_results
+from boomerang.web_source import fetch_web_source, parse_source_url_arg
+from boomerang.x_posts import fetch_x_posts
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +31,17 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--keyword",
 		help="争点キーワード（例: 定数削減）。発言本文で絞り込み、10〜30年前まで遡って照合する",
+	)
+	parser.add_argument(
+		"--x-handle",
+		help="本人のXアカウント名（例: @xxxx）。指定すると本人ポストも照合対象に加える（一次ソース・グレードA）",
+	)
+	parser.add_argument(
+		"--source-url",
+		action="append",
+		default=[],
+		metavar="[YYYY-MM-DD:]URL",
+		help="公式サイトの全文ページ（会見録・党大会演説等）を照合対象に加える（グレードB）。複数指定可。日付をページから特定できない場合は 'YYYY-MM-DD:URL' 形式で指定",
 	)
 	parser.add_argument(
 		"--max-speeches",
@@ -108,6 +121,28 @@ def main() -> None:
 		sys.exit(0)
 
 	print(f"✅ {len(speeches)}件の発言を取得しました。")
+
+	# 1b. 本人Xポスト（--x-handle オプション）
+	if args.x_handle:
+		print(f"🐦 本人Xポスト（{args.x_handle}）を取得中...")
+		x_speeches = fetch_x_posts(
+			speaker_name=speaker,
+			handle=args.x_handle,
+			keyword=args.keyword,
+		)
+		if x_speeches:
+			print(f"✅ 本人Xポスト {len(x_speeches)}件を照合対象に追加しました。")
+			speeches.extend(x_speeches)
+
+	# 1c. 公式サイトの全文ページ（--source-url オプション）
+	for raw_arg in args.source_url:
+		url, url_date = parse_source_url_arg(raw_arg)
+		print(f"🌐 全文ページを取得中: {url}")
+		web_speech = fetch_web_source(speaker_name=speaker, url=url, date=url_date)
+		if web_speech:
+			label = web_speech.date or "日付不明"
+			print(f"✅ 全文ページ（{label}・{len(web_speech.speech_text):,}字）を照合対象に追加しました。")
+			speeches.append(web_speech)
 
 	# 2. Gemini APIで矛盾分析
 	print("🔍 Gemini APIで矛盾発言を分析中...")
