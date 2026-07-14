@@ -37,9 +37,9 @@ def _strip_html(html: str) -> str:
 	return "\n".join(ln for ln in lines if ln)
 
 
-def _extract_date(text: str) -> str:
-	"""ページ本文から日付（YYYY-MM-DD）を推定する。見つからなければ空文字。"""
-	t = text[:3000].translate(_ZEN2HAN)  # 日付はページ冒頭にあることが多い
+def parse_jp_date(text: str) -> str:
+	"""和文の日付表記（西暦・令和）をYYYY-MM-DDに変換する。見つからなければ空文字。"""
+	t = text.translate(_ZEN2HAN)
 
 	# 西暦表記（2025年11月4日）
 	m = re.search(r"(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日", t)
@@ -53,6 +53,11 @@ def _extract_date(text: str) -> str:
 		return f"{year}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
 
 	return ""
+
+
+def _extract_date(text: str) -> str:
+	"""ページ本文から日付（YYYY-MM-DD）を推定する。見つからなければ空文字。"""
+	return parse_jp_date(text[:3000])  # 日付はページ冒頭にあることが多い
 
 
 def parse_source_url_arg(arg: str) -> tuple[str, str]:

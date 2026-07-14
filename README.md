@@ -41,6 +41,18 @@ python main.py 野田佳彦 --promise --keyword 定数削減 --x-handle NODAYOSH
 | 国会会議録API | 既定（議員名＋`--keyword`） | A（完全な一次記録） |
 | 本人Xポスト | `--x-handle @xxxx`（x_deep_dive 基盤・要 AUTH_TOKEN/CT0） | A（本人発信そのもの） |
 | 公式サイトの全文ページ（会見録・党大会演説等） | `--source-url [YYYY-MM-DD:]URL`（複数指定可） | B（一次だが完全性は運用者の確認に依存） |
+| 公式会見録の自動発見（官邸・自民党） | `--kaiken kantei` / `--kaiken jimin`（一覧から自動列挙・`--kaiken-year` で年別アーカイブ） | B（同上） |
+| YouTubeノーカット動画の字幕 | `--video [YYYY-MM-DD:]URL`（複数指定可・自動生成字幕含む） | B（自動字幕は誤起こしあり・動画で要確認） |
+
+`--kaiken` の対応サイト:
+
+- **kantei**: 首相官邸「総理の演説・記者会見など」。現内閣の代数はトップページから自動発見
+  （`--kaiken-cabinet 104` で前内閣等も指定可）。官邸サイトは現職＋過去3代分のみ保持で、
+  それ以前は国立国会図書館WARP（warp.ndl.go.jp）にアーカイブされている（WARP対応は今後の拡張）
+- **jimin**: 自民党の役員記者会見（幹事長・政調会長等）。一覧の実体が年別静的JSON
+  （`/news/data/<年>_all.json`）なので堅牢に列挙できる。個別ページは一問一答の全文書き起こし
+- 立憲民主党は会見ページが党広報の**要約記事**（全文書き起こしなし）のため `--kaiken` 非対応。
+  党公式チャンネルのノーカット会見動画を `--video` で渡すのが正攻法
 
 **報道記事は引用元にしない**（記事は「発言があったことを知るインデックス」に使い、
 引用は必ず上記の一次ソースに錨を打つ）。出典格付けは出力に常に表示される。
@@ -94,6 +106,15 @@ python main.py 野田佳彦 --keyword 定数削減
 # 本人Xポストと公式全文ページも照合対象に加える
 python main.py 野田佳彦 --keyword 定数削減 --x-handle NODAYOSHI55 \
   --source-url "2012-11-16:https://example.gov/kaiken20121116.html"
+
+# 官邸の会見録を自動発見して照合対象に加える（年別アーカイブ・新しい順に最大10件）
+python main.py 高市早苗 --keyword 物価 --kaiken kantei --kaiken-year 2026
+
+# 自民党の役員会見（タイトルに議員の姓を含むものを優先して取得）
+python main.py 鈴木俊一 --keyword 消費税 --kaiken jimin --kaiken-limit 5
+
+# YouTubeノーカット動画の字幕を照合対象に加える（公式チャンネルの動画を渡すこと）
+python main.py 水岡俊一 --keyword 消費税 --video "https://www.youtube.com/watch?v=xxxxxxxxxxx"
 
 # LLMをClaudeに切替（Claude Code CLIのサブスク枠。APIキー不要・高精度・低速）
 # 公開用の本番実行は claude、安価なスキャンは gemini（既定）が目安
@@ -162,7 +183,9 @@ boomerang-checker/
     ├── __init__.py
     ├── kokkai_api.py        # 国会会議録API クライアント（発言取得＋前後文脈取得）
     ├── x_posts.py           # 本人Xポストの取り込み（x_deep_dive 基盤利用）
-    ├── web_source.py        # 公式サイト全文ページの取り込み
+    ├── web_source.py        # 公式サイト全文ページの取り込み（URL手動指定）
+    ├── kaiken_source.py     # 公式会見録の発見層（官邸・自民党の一覧から自動列挙）
+    ├── video_source.py      # YouTube動画の字幕取り込み（タイムスタンプ逆引き付き）
     ├── analyzer.py          # Gemini API 矛盾分析（検出＋原文抜粋の機械検証）
     ├── verifier.py          # 弁護人レビュー（文脈検証・切り抜き防止）
     └── formatter.py         # 出力フォーマッター（公開3階層・出典格付け表示）

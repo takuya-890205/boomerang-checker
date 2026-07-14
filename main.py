@@ -22,9 +22,12 @@ from boomerang.formatter import (
 	format_terminal,
 	format_x,
 )
+from boomerang.kaiken_source import SITES as KAIKEN_SITES
+from boomerang.kaiken_source import fetch_kaiken_speeches
 from boomerang.kokkai_api import fetch_speeches
 from boomerang.promise_tracker import extract_promise_cards, verify_promise_cards
 from boomerang.verifier import verify_results
+from boomerang.video_source import fetch_video_transcript, parse_video_arg
 from boomerang.web_source import fetch_web_source, parse_source_url_arg
 from boomerang.x_posts import fetch_x_posts
 
@@ -52,6 +55,37 @@ def parse_args() -> argparse.Namespace:
 		default=[],
 		metavar="[YYYY-MM-DD:]URL",
 		help="公式サイトの全文ページ（会見録・党大会演説等）を照合対象に加える（グレードB）。複数指定可。日付をページから特定できない場合は 'YYYY-MM-DD:URL' 形式で指定",
+	)
+	parser.add_argument(
+		"--video",
+		action="append",
+		default=[],
+		metavar="[YYYY-MM-DD:]URL",
+		help="YouTubeノーカット動画の字幕（自動生成含む）を照合対象に加える（グレードB）。複数指定可。公式チャンネルのノーカット動画を渡すこと。日付省略時は動画の公開日を使う",
+	)
+	parser.add_argument(
+		"--kaiken",
+		action="append",
+		default=[],
+		choices=sorted(KAIKEN_SITES),
+		metavar="SITE",
+		help=f"公式サイトの会見録一覧から自動発見して照合対象に加える（グレードB）。複数指定可。対応: {', '.join(sorted(KAIKEN_SITES))}",
+	)
+	parser.add_argument(
+		"--kaiken-limit",
+		type=int,
+		default=10,
+		help="--kaiken で全文を取得する最大ページ数（一覧の新しい順。デフォルト: 10）",
+	)
+	parser.add_argument(
+		"--kaiken-year",
+		type=int,
+		help="--kaiken で年別アーカイブ（西暦）から列挙する（省略時は最新一覧）",
+	)
+	parser.add_argument(
+		"--kaiken-cabinet",
+		type=int,
+		help="--kaiken kantei で対象の内閣の代数を指定（例: 104。省略時は現内閣を自動発見）",
 	)
 	parser.add_argument(
 		"--max-speeches",
@@ -169,6 +203,31 @@ def main() -> None:
 			label = web_speech.date or "日付不明"
 			print(f"✅ 全文ページ（{label}・{len(web_speech.speech_text):,}字）を照合対象に追加しました。")
 			speeches.append(web_speech)
+
+	# 1d. YouTube動画の文字起こし（--video オプション）
+	for raw_arg in args.video:
+		video, video_date = parse_video_arg(raw_arg)
+		print(f"🎬 動画の字幕を取得中: {video}")
+		video_speech = fetch_video_transcript(speaker_name=speaker, video=video, date=video_date)
+		if video_speech:
+			label = video_speech.date or "日付不明"
+			print(f"✅ 動画文字起こし（{label}・{len(video_speech.speech_text):,}字）を照合対象に追加しました。")
+			speeches.append(video_speech)
+
+	# 1e. 公式会見録の自動発見（--kaiken オプション）
+	for site in args.kaiken:
+		print(f"🏛️ 公式会見録を自動発見中: {site}")
+		kaiken_speeches = fetch_kaiken_speeches(
+			speaker_name=speaker,
+			site=site,
+			keyword=args.keyword,
+			limit=args.kaiken_limit,
+			year=args.kaiken_year,
+			cabinet=args.kaiken_cabinet,
+		)
+		if kaiken_speeches:
+			print(f"✅ 公式会見録 {len(kaiken_speeches)}件を照合対象に追加しました。")
+			speeches.extend(kaiken_speeches)
 
 	# 約束トラッカーモード（言vs行）
 	if args.promise:
