@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """🪃 ブーメランチェッカー
 
-国会議事録APIとClaude APIを使って、
+国会議事録APIとGemini APIを使って、
 議員の過去の矛盾・ブーメラン発言を検出するCLIツール。
+検出結果は弁護人レビュー（前後文脈・原文照合による検証）を通してから出力する。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import sys
 from boomerang.analyzer import analyze_speeches
 from boomerang.formatter import format_note, format_sns, format_terminal, format_x
 from boomerang.kokkai_api import fetch_speeches
+from boomerang.verifier import verify_results
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,6 +43,11 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--api-key",
 		help="Gemini API キー（省略時は環境変数 GEMINI_API_KEY を使用）",
+	)
+	parser.add_argument(
+		"--no-verify",
+		action="store_true",
+		help="弁護人レビュー（文脈検証）をスキップする（API使用量の節約用。SNS出力の信頼性は下がる）",
 	)
 	parser.add_argument(
 		"--sns",
@@ -110,14 +117,34 @@ def main() -> None:
 		)
 		sys.exit(1)
 
-	# 3. 結果表示
+	# 3. 弁護人レビュー（文脈検証・切り抜き防止）
+	verified_run = False
+	if results and not args.no_verify:
+		print(f"⚖️  検出された{len(results)}組を弁護人レビューで検証中...")
+		try:
+			before = len(results)
+			results = verify_results(
+				speaker=speaker,
+				results=results,
+				api_key=args.api_key,
+			)
+			verified_run = True
+			dropped = before - len(results)
+			if dropped:
+				print(f"✅ 検証完了: {dropped}組を誤読として棄却し、{len(results)}組が残りました。")
+			else:
+				print(f"✅ 検証完了: {len(results)}組すべてが検証を通過しました。")
+		except Exception as e:
+			print(f"⚠️ 弁護人レビューに失敗したため未検証の結果を表示します: {e}", file=sys.stderr)
+
+	# 4. 結果表示
 	print(format_terminal(speaker, results))
 
 	# SNSフォーマット（--sns オプション）
 	if args.sns:
 		print("\n📋 SNS投稿用テキスト:")
 		print("-" * 40)
-		sns_text = format_sns(speaker, results)
+		sns_text = format_sns(speaker, results, verified_run=verified_run)
 		print(sns_text)
 		print("-" * 40)
 		print(f"（{len(sns_text)}文字）")
@@ -126,7 +153,7 @@ def main() -> None:
 	if args.x:
 		print("\n🐦 X（旧Twitter）投稿用テキスト:")
 		print("-" * 40)
-		x_text = format_x(speaker, results)
+		x_text = format_x(speaker, results, verified_run=verified_run)
 		print(x_text)
 		print("-" * 40)
 
