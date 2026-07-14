@@ -12,8 +12,18 @@ import argparse
 import sys
 
 from boomerang.analyzer import analyze_speeches
-from boomerang.formatter import format_note, format_sns, format_terminal, format_x
+from boomerang.formatter import (
+	format_note,
+	format_promise_note,
+	format_promise_sns,
+	format_promise_terminal,
+	format_promise_x,
+	format_sns,
+	format_terminal,
+	format_x,
+)
 from boomerang.kokkai_api import fetch_speeches
+from boomerang.promise_tracker import extract_promise_cards, verify_promise_cards
 from boomerang.verifier import verify_results
 from boomerang.web_source import fetch_web_source, parse_source_url_arg
 from boomerang.x_posts import fetch_x_posts
@@ -60,6 +70,11 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--api-key",
 		help="Gemini API キー（省略時は環境変数 GEMINI_API_KEY を使用）",
+	)
+	parser.add_argument(
+		"--promise",
+		action="store_true",
+		help="約束トラッカーモード（言vs行）。過去の約束・実績と現在の態度を突き合わせる（発言vs発言の矛盾検出の代わりに実行）",
 	)
 	parser.add_argument(
 		"--no-verify",
@@ -144,6 +159,11 @@ def main() -> None:
 			print(f"✅ 全文ページ（{label}・{len(web_speech.speech_text):,}字）を照合対象に追加しました。")
 			speeches.append(web_speech)
 
+	# 約束トラッカーモード（言vs行）
+	if args.promise:
+		run_promise_mode(args, speaker, speeches)
+		return
+
 	# 2. Gemini APIで矛盾分析
 	print("🔍 Gemini APIで矛盾発言を分析中...")
 	try:
@@ -214,6 +234,70 @@ def main() -> None:
 		else:
 			# ファイルに出力（ファイルパス未指定時はデフォルト名を使用）
 			output_path = args.note if args.note else f"{speaker}_boomerang.md"
+			with open(output_path, "w", encoding="utf-8") as f:
+				f.write(note_text)
+			print(f"\n📝 Note向けマークダウンを保存しました: {output_path}")
+
+
+def run_promise_mode(args: argparse.Namespace, speaker: str, speeches: list) -> None:
+	"""約束トラッカーモードの実行（抽出→弁護人レビュー→カード出力）"""
+	print("🔍 約束・実績と現在の態度を突き合わせ中...")
+	try:
+		cards = extract_promise_cards(
+			speaker=speaker,
+			speeches=speeches,
+			api_key=args.api_key,
+			keyword=args.keyword,
+		)
+	except Exception as e:
+		print(f"エラー: 抽出に失敗しました: {e}", file=sys.stderr)
+		sys.exit(1)
+
+	verified_run = False
+	if cards and not args.no_verify:
+		print(f"⚖️  検出された{len(cards)}枚を弁護人レビューで検証中...")
+		try:
+			before = len(cards)
+			cards = verify_promise_cards(
+				speaker=speaker,
+				cards=cards,
+				api_key=args.api_key,
+				keyword=args.keyword,
+			)
+			verified_run = True
+			dropped = before - len(cards)
+			if dropped:
+				print(f"✅ 検証完了: {dropped}枚を誤読として棄却し、{len(cards)}枚が残りました。")
+			else:
+				print(f"✅ 検証完了: {len(cards)}枚すべてが検証を通過しました。")
+		except Exception as e:
+			print(f"⚠️ 弁護人レビューに失敗したため未検証の結果を表示します: {e}", file=sys.stderr)
+
+	print(format_promise_terminal(speaker, cards))
+
+	if args.sns:
+		print("\n📋 SNS投稿用テキスト:")
+		print("-" * 40)
+		sns_text = format_promise_sns(speaker, cards, verified_run=verified_run)
+		print(sns_text)
+		print("-" * 40)
+		print(f"（{len(sns_text)}文字）")
+
+	if args.x:
+		print("\n🐦 X（旧Twitter）投稿用テキスト:")
+		print("-" * 40)
+		print(format_promise_x(speaker, cards, verified_run=verified_run))
+		print("-" * 40)
+
+	if args.note is not None:
+		note_text = format_promise_note(speaker, cards)
+		if args.note == "-":
+			print("\n📝 Note向けマークダウン:")
+			print("=" * 40)
+			print(note_text)
+			print("=" * 40)
+		else:
+			output_path = args.note if args.note else f"{speaker}_promise_tracker.md"
 			with open(output_path, "w", encoding="utf-8") as f:
 				f.write(note_text)
 			print(f"\n📝 Note向けマークダウンを保存しました: {output_path}")

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 
 from boomerang.analyzer import BoomerangResult
+from boomerang.promise_tracker import PromiseCard
 
 
 def _score_bar(score: int) -> str:
@@ -326,4 +327,255 @@ def format_note(speaker: str, results: list[BoomerangResult]) -> str:
 	lines.append("")
 	lines.append("#ブーメランチェッカー #国会議事録")
 
+	return "\n".join(lines)
+
+
+# ============================================================
+# 約束トラッカー（PromiseCard）用フォーマッター
+# ============================================================
+
+_TYPE_ICON = {"約束不履行型": "📜", "実績否認型": "🏛️"}
+
+
+def _card_quote(excerpt: str, verified: bool, summary: str) -> str:
+	"""カードの引用表示（原文照合済みなら原文、そうでなければAI要約にフォールバック）"""
+	if verified and excerpt:
+		return f"「{excerpt}」（原文）"
+	return f"「{summary}」（AI要約）"
+
+
+def _card_venue(s) -> str:
+	year = s.date[:4] if s.date else "????"
+	venue = f"{s.name_of_house} {s.name_of_meeting}".strip()
+	return f"{year}年 {venue}"
+
+
+def _card_verdict_label(card: PromiseCard) -> str:
+	if card.verdict == "confirmed":
+		return "🔥 弁護人レビュー通過（言行不一致確定・断定調で公開可）"
+	if card.verdict == "explainable":
+		return "⚖️ グレー（説明可能・言い分併記でのみ公開可）"
+	return ""
+
+
+def format_promise_terminal(speaker: str, cards: list[PromiseCard]) -> str:
+	"""約束トラッカーのターミナル表示"""
+	lines: list[str] = []
+	lines.append("")
+	lines.append("=" * 56)
+	lines.append(f"  🪃 約束トラッカー  議員名：{speaker}")
+	lines.append("=" * 56)
+
+	if not cards:
+		lines.append("")
+		lines.append("  言行不一致のカードは検出されませんでした。")
+		lines.append("")
+		lines.append("=" * 56)
+		return "\n".join(lines)
+
+	for i, c in enumerate(cards, 1):
+		icon = _TYPE_ICON.get(c.card_type, "🪃")
+		lines.append("")
+		lines.append(f"  {icon} カード#{i}【{c.card_type}】 スコア: {_score_bar(c.score)}")
+		verdict_label = _card_verdict_label(c)
+		if verdict_label:
+			lines.append(f"  {verdict_label}")
+		lines.append("")
+		past_label = "約束" if c.card_type == "約束不履行型" else "実績"
+		lines.append(f"  {icon} {past_label}（{_card_venue(c.past_speech)}）［出典: {c.past_speech.source} {c.past_speech.source_grade}］")
+		lines.append(f"  {_card_quote(c.past_excerpt, c.past_verified, c.past_summary)}")
+		if c.deadline:
+			lines.append(f"  ⏰ 期限の言明: {c.deadline}")
+		if c.past_speech.speech_url:
+			lines.append(f"  🔗 {c.past_speech.speech_url}")
+		if c.facts:
+			lines.append("")
+			lines.append("  📉 事実経過:")
+			for f in c.facts:
+				if f.verified:
+					lines.append(f"    ✅ {f.claim}")
+					anchor = f.anchor_speech
+					if anchor is not None:
+						lines.append(f"       └ 根拠: {_card_venue(anchor)}「{f.anchor_excerpt[:60]}」")
+						if anchor.speech_url:
+							lines.append(f"         🔗 {anchor.speech_url}")
+				else:
+					lines.append(f"    ⚠️ {f.claim}（発言中に根拠なし・機械照合待ち。SNS出力からは除外）")
+		lines.append("")
+		lines.append(f"  🔄 現在（{_card_venue(c.current_speech)}）［出典: {c.current_speech.source} {c.current_speech.source_grade}］")
+		lines.append(f"  {_card_quote(c.current_excerpt, c.current_verified, c.current_summary)}")
+		if c.current_speech.speech_url:
+			lines.append(f"  🔗 {c.current_speech.speech_url}")
+		lines.append("")
+		lines.append(f"  💬 {c.gap}")
+		if c.defense:
+			lines.append(f"  ⚖️ 想定される言い分: {c.defense}")
+		lines.append("")
+		lines.append("-" * 56)
+
+	lines.append("")
+	lines.append(f"  検出数: {len(cards)}件")
+	lines.append("")
+	lines.append("=" * 56)
+	return "\n".join(lines)
+
+
+def _publishable_cards(cards: list[PromiseCard], verified_run: bool) -> list[PromiseCard]:
+	if not verified_run:
+		return cards
+	publishable = [c for c in cards if c.publish_tier]
+	publishable.sort(key=lambda c: (0 if c.publish_tier == "confirmed" else 1, -c.score))
+	return publishable
+
+
+def _format_promise_card_sns(c: PromiseCard, verified_run: bool) -> list[str]:
+	"""SNS向けのカード1枚分のテキスト行"""
+	icon = _TYPE_ICON.get(c.card_type, "🪃")
+	past_year = c.past_speech.date[:4] if c.past_speech.date else "????"
+	cur_year = c.current_speech.date[:4] if c.current_speech.date else "????"
+	past_label = "約束" if c.card_type == "約束不履行型" else "実績"
+
+	lines: list[str] = []
+	lines.append(f"{icon} {past_year}年（{past_label}）「{c.past_excerpt}」")
+	for f in c.verified_facts:
+		lines.append(f"📉 {f.claim}")
+	lines.append(f"🔄 {cur_year}年「{c.current_excerpt}」")
+	lines.append(f"→ {c.gap}")
+	if verified_run and c.publish_tier == "gray":
+		lines.append(f"⚖️ 想定される言い分: {c.defense}")
+		lines.append("判定はあなたに委ねます。")
+	elif verified_run and c.publish_tier == "confirmed":
+		lines.append("⚖️ 弁護人レビューでも説明がつかず、言行不一致が確定")
+	if c.past_speech.speech_url:
+		lines.append(f"🔗 {c.past_speech.speech_url}")
+	if c.current_speech.speech_url:
+		lines.append(f"🔗 {c.current_speech.speech_url}")
+	return lines
+
+
+def format_promise_sns(speaker: str, cards: list[PromiseCard], verified_run: bool = False) -> str:
+	"""約束トラッカーのSNS投稿用フォーマット"""
+	publishable = _publishable_cards(cards, verified_run)
+
+	lines: list[str] = []
+	lines.append(f"🪃 約束トラッカー：{speaker}")
+	lines.append("")
+
+	if not publishable:
+		if verified_run and cards:
+			lines.append("検出された候補はいずれも検証（原文照合・弁護人レビュー）を通過しませんでした。")
+		else:
+			lines.append("言行不一致は検出されませんでした。")
+		return "\n".join(lines)
+
+	for i, c in enumerate(publishable, 1):
+		lines.append(f"【{c.card_type} #{i}】")
+		lines.extend(_format_promise_card_sns(c, verified_run))
+		lines.append("")
+
+	lines.append(f"検出数: {len(publishable)}件")
+	if verified_run:
+		lines.append("※引用は一次ソースの原文と照合済み（出典リンクから全文を確認できます）")
+	lines.append("")
+	lines.append("#約束トラッカー #国会 #議事録")
+	return "\n".join(lines)
+
+
+def format_promise_x(speaker: str, cards: list[PromiseCard], verified_run: bool = False) -> str:
+	"""約束トラッカーのX投稿用（公開優先度が最も高い1枚）"""
+	publishable = _publishable_cards(cards, verified_run)
+	if not publishable:
+		return (
+			f"🪃【約束トラッカー】{speaker}\n\n"
+			"検出された候補はいずれも検証（原文照合・弁護人レビュー）を通過しませんでした。"
+		)
+
+	c = publishable[0]
+	is_gray = verified_run and c.publish_tier == "gray"
+	icon = _TYPE_ICON.get(c.card_type, "🪃")
+	past_year = c.past_speech.date[:4] if c.past_speech.date else "????"
+	cur_year = c.current_speech.date[:4] if c.current_speech.date else "????"
+
+	lines: list[str] = []
+	title = "約束トラッカー？" if is_gray else "約束トラッカー"
+	lines.append(f"🪃【{title}】{speaker}（{c.card_type}）")
+	lines.append("")
+	lines.append(f"{icon}{past_year}年「{_truncate(c.past_excerpt, 60)}」")
+	for f in c.verified_facts[:2]:
+		lines.append(f"📉 {_truncate(f.claim, 40)}")
+	lines.append(f"🔄{cur_year}年「{_truncate(c.current_excerpt, 60)}」")
+	lines.append("")
+	lines.append(f"→ {_truncate(c.gap, 60)}")
+	if is_gray:
+		lines.append(f"⚖️ 想定される言い分: {_truncate(c.defense, 60)}")
+		lines.append("")
+		lines.append("あなたはどう見ますか？")
+	if verified_run:
+		lines.append("※発言は原文より引用（リンク先で全文確認可）")
+	lines.append(f"#{speaker} #約束トラッカー")
+	if c.past_speech.speech_url:
+		lines.append("")
+		lines.append(f"🔗 {c.past_speech.speech_url}")
+
+	text = "\n".join(lines)
+	return text + f"\n（{len(text)}字）"
+
+
+def format_promise_note(speaker: str, cards: list[PromiseCard]) -> str:
+	"""約束トラッカーのNote向けマークダウン"""
+	today_str = date.today().strftime("%Y年%m月%d日")
+	lines: list[str] = []
+	lines.append(f"# 🪃 {speaker} 約束トラッカー（{today_str}時点）")
+	lines.append("")
+	lines.append("> 「言ったこと」と「やったこと」の突き合わせを、国会議事録・本人Xポスト等の一次ソース原文で行った結果です。")
+	lines.append("> 引用はすべて原文との機械照合済み。想定される言い分も併記しています。")
+	lines.append("")
+	lines.append("---")
+
+	if not cards:
+		lines.append("")
+		lines.append("言行不一致は検出されませんでした。")
+		return "\n".join(lines)
+
+	for i, c in enumerate(cards, 1):
+		past_label = "📜 約束" if c.card_type == "約束不履行型" else "🏛️ 実績"
+		lines.append("")
+		lines.append(f"## #{i}【{c.card_type}】スコア: {c.score}点")
+		verdict_label = _card_verdict_label(c)
+		if verdict_label:
+			lines.append(f"（{verdict_label}）")
+		lines.append("")
+		lines.append(f"### {past_label}（{_card_venue(c.past_speech)}）")
+		lines.append(f"> {c.past_excerpt if c.past_verified else c.past_summary}")
+		lines.append("")
+		if c.deadline:
+			lines.append(f"⏰ 期限の言明: {c.deadline}")
+			lines.append("")
+		if c.past_speech.speech_url:
+			lines.append(f"[🔗 原文を確認する]({c.past_speech.speech_url})")
+			lines.append("")
+		if c.verified_facts:
+			lines.append("### 📉 事実経過")
+			for f in c.verified_facts:
+				anchor = f.anchor_speech
+				if anchor is not None and anchor.speech_url:
+					lines.append(f"- {f.claim}（[根拠: {_card_venue(anchor)}]({anchor.speech_url})）")
+				else:
+					lines.append(f"- {f.claim}")
+			lines.append("")
+		lines.append(f"### 🔄 現在（{_card_venue(c.current_speech)}）")
+		lines.append(f"> {c.current_excerpt if c.current_verified else c.current_summary}")
+		lines.append("")
+		if c.current_speech.speech_url:
+			lines.append(f"[🔗 原文を確認する]({c.current_speech.speech_url})")
+			lines.append("")
+		lines.append(f"**対比:** {c.gap}")
+		if c.defense:
+			lines.append("")
+			lines.append(f"**⚖️ 想定される言い分:** {c.defense}")
+		lines.append("")
+		lines.append("---")
+
+	lines.append("")
+	lines.append("#約束トラッカー #国会議事録")
 	return "\n".join(lines)

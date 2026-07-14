@@ -145,50 +145,113 @@ def _trim_speeches_to_token_budget(
 	return trimmed
 
 
-def _normalize_for_match(text: str) -> str:
-	"""原文一致検証用にテキストを正規化する（空白・改行・全角半角の揺れを吸収）"""
-	import re
-	import unicodedata
-
-	text = re.sub(r"<[^>]+>", "", text)  # HTMLタグ除去（truncate_speech と揃える）
-	text = unicodedata.normalize("NFKC", text)
-	return re.sub(r"\s+", "", text)
-
-
 # 断片がこの長さ未満だと偶然一致しうるため検証を通さない
 MIN_FRAGMENT_CHARS = 8
 
 
-def verify_excerpt(excerpt: str, original_text: str) -> bool:
-	"""LLMが返した抜粋が原文に実在するかを検証する（ハルシネーション対策）。
+def _relaxed_stream(text: str) -> tuple[str, list[int]]:
+	"""照合用の緩い正規化ストリームと、原文位置への対応表を作る。
 
-	「…」「（中略）」「...」で明示的に省略された抜粋は、断片ごとに分割し
-	**全断片が原文に、抜粋と同じ順序で実在する**場合のみ合格とする
-	（透明な省略は許容し、無言の改変・捏造は拒否する）。
+	NFKC正規化のうえ、空白と句読点・記号を除去する（LLM抜粋の句読点レベルの
+	揺れを吸収するため）。文字内容そのものは変えないので、8文字以上の
+	日本語断片が偶然一致することは実用上ない。
+	"""
+	import re
+	import unicodedata
+
+	stream_chars: list[str] = []
+	index_map: list[int] = []
+	# HTMLタグは範囲ごと除去（原文位置の対応を保つためタグ内はスキップ）
+	tag_spans = [(m.start(), m.end()) for m in re.finditer(r"<[^>]+>", text)]
+
+	def in_tag(i: int) -> bool:
+		return any(s <= i < e for s, e in tag_spans)
+
+	for i, ch in enumerate(text):
+		if in_tag(i):
+			continue
+		for nch in unicodedata.normalize("NFKC", ch):
+			if nch.isspace():
+				continue
+			cat = unicodedata.category(nch)
+			if cat.startswith("P") or cat.startswith("S"):
+				continue  # 句読点・記号は照合対象から除外
+			stream_chars.append(nch)
+			index_map.append(i)
+
+	return "".join(stream_chars), index_map
+
+
+def match_excerpt(excerpt: str, original_text: str) -> str | None:
+	"""LLMが返した抜粋を原文と照合し、一致すれば**原文どおりの抜粋**を返す。
+
+	- 「…」「（中略）」「...」で明示的に省略された抜粋は断片ごとに分割し、
+	  全断片が原文に抜粋と同じ順序で実在する場合のみ合格
+	  （透明な省略は許容し、捏造・順序の入れ替えは拒否する）
+	- 照合は句読点・空白・全角半角を無視して行い、合格時は表示用の抜粋を
+	  LLM出力ではなく**原文の該当範囲そのもの**に置き換える（改変引用の混入防止）
+	- 不合格なら None
 	"""
 	import re
 
 	if not excerpt:
-		return False
+		return None
 
-	norm_original = _normalize_for_match(original_text)
-	fragments = [
-		f for f in re.split(r"…|（中略）|\.\.\.", excerpt) if _normalize_for_match(f)
-	]
+	stream, index_map = _relaxed_stream(original_text)
+	fragments = [f for f in re.split(r"…|（中略）|\.\.\.", excerpt) if f.strip()]
 	if not fragments:
-		return False
+		return None
 
+	repaired: list[str] = []
 	pos = 0
 	for fragment in fragments:
-		norm_frag = _normalize_for_match(fragment)
-		if len(norm_frag) < MIN_FRAGMENT_CHARS:
-			return False  # 短すぎる断片は偶然一致しうるため不合格
-		found = norm_original.find(norm_frag, pos)
-		if found < 0:
-			return False
-		pos = found + len(norm_frag)
+		frag_stream, _ = _relaxed_stream(fragment)
+		if len(frag_stream) < MIN_FRAGMENT_CHARS:
+			return None  # 短すぎる断片は偶然一致しうるため不合格
+		hit = _find_fragment(stream, frag_stream, pos)
+		if hit is None:
+			return None
+		found, core_len = hit
+		start = index_map[found]
+		end = index_map[found + core_len - 1]
+		# 原文の該当範囲を採用（改行等の空白だけは1スペースに正規化）
+		repaired.append(" ".join(original_text[start:end + 1].split()))
+		pos = found + core_len
 
-	return True
+	return "…".join(repaired)
+
+
+# 断片の端の削り許容量（LLMが語尾・接続詞を付け足す軽微な揺れの吸収用。
+# 中身の改変は救わない＝断片の中央部が原文に無ければ不合格のまま）
+MAX_TRIM = 8
+
+
+def _find_fragment(stream: str, frag: str, pos: int) -> tuple[int, int] | None:
+	"""断片を原文ストリームから探す。端のトリムを許容し、(位置, コア長) を返す。
+
+	完全一致を最優先し、失敗時は先頭・末尾を合計 MAX_TRIM 文字（かつ断片の
+	25%以内）まで削った「コア」での一致を、削り量の少ない順に試す。
+	"""
+	found = stream.find(frag, pos)
+	if found >= 0:
+		return found, len(frag)
+
+	max_trim = min(MAX_TRIM, len(frag) // 4)
+	for total in range(1, max_trim + 1):
+		for head in range(total + 1):
+			tail = total - head
+			core = frag[head:len(frag) - tail] if tail else frag[head:]
+			if len(core) < MIN_FRAGMENT_CHARS:
+				continue
+			found = stream.find(core, pos)
+			if found >= 0:
+				return found, len(core)
+	return None
+
+
+def verify_excerpt(excerpt: str, original_text: str) -> bool:
+	"""抜粋が原文に実在するかの真偽だけを返す（match_excerpt の簡易版）"""
+	return match_excerpt(excerpt, original_text) is not None
 
 
 def _anchor_speech(
@@ -208,15 +271,20 @@ def _anchor_speech(
 	speech = speeches[idx]
 	if not excerpt:
 		return speech, excerpt, False
-	if verify_excerpt(excerpt, speech.speech_text):
-		return speech, excerpt, True
+	repaired = match_excerpt(excerpt, speech.speech_text)
+	if repaired is not None:
+		return speech, repaired, True
 
-	matches = [s for s in speeches if verify_excerpt(excerpt, s.speech_text)]
+	matches = [
+		(s, rep) for s in speeches
+		if (rep := match_excerpt(excerpt, s.speech_text)) is not None
+	]
 	if len(matches) == 1:
-		print(f"  🔧 抜粋{label}のインデックスずれを自動補正しました（発言{idx} → {matches[0].date}の発言）")
-		return matches[0], excerpt, True
+		matched_speech, repaired = matches[0]
+		print(f"  🔧 抜粋{label}のインデックスずれを自動補正しました（発言{idx} → {matched_speech.date}の発言）")
+		return matched_speech, repaired, True
 
-	print(f"  ⚠️  抜粋{label}が原文と一致しません（改変引用の疑い）: 「{excerpt[:40]}...」")
+	print(f"  ⚠️  抜粋{label}が原文と一致しません（改変引用の疑い）: 「{excerpt[:60]}...」")
 	return speech, excerpt, False
 
 
